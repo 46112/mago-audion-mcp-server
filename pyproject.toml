@@ -22,7 +22,7 @@ dev-dependencies = [
 ]
 
 [project.scripts]
-audion-mcp-server = "audion_mcp_server.server:main"
+audion-mcp-server = "src.audion_mcp_server.server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
