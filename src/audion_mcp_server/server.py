@@ -12,6 +12,8 @@ from mcp.types import Tool
 import mcp.server.stdio
 import mcp.types as types
 from pydantic import BaseModel, Field
+from pathlib import Path
+from datetime import datetime
 
 from .audion_client import AudionClient
 
@@ -28,6 +30,14 @@ class AudionVuInput(BaseModel):
     input_source: str = Field(description="File path or URL to audio/video content")
     language: Optional[str] = Field(default=None, description="Language code (e.g., 'ko', 'en')")
     format: Optional[str] = Field(default="json", description="Output format: json, text, srt")
+
+
+class AudionSubtitleInput(BaseModel):
+    """Input parameters for Audion Subtitle Download."""
+    input_source: str = Field(description="File path or URL to audio/video content")
+    output_path: Optional[str] = Field(default=None, description="Output path for subtitle file (defaults to ./subtitles/)")
+    language: Optional[str] = Field(default=None, description="Language code (e.g., 'ko', 'en')")
+    format: Optional[str] = Field(default="srt", description="Subtitle format: srt, vtt, txt")
 
 
 class AudionVhInput(BaseModel):
@@ -76,6 +86,74 @@ async def audion_vh_process(input_source: str, highlight_keywords: list[str], la
         }
 
 
+async def audion_subtitle_download(input_source: str, output_path: Optional[str] = None, language: Optional[str] = None, format: str = "srt") -> Dict[str, Any]:
+    """Generate and download subtitle file from audio/video content."""
+    try:
+        # Get the transcription in the requested subtitle format
+        result = audion_client.process_voice_understanding(
+            input_source=input_source,
+            language=language,
+            format=format
+        )
+        
+        # Determine output path
+        if output_path is None:
+            # Create default subtitles directory
+            subtitle_dir = Path("./subtitles")
+            subtitle_dir.mkdir(exist_ok=True)
+            
+            # Generate filename based on source
+            if input_source.startswith(('http://', 'https://')):
+                # Extract video ID or title from URL
+                filename_base = input_source.split('/')[-1].split('?')[0].split('.')[0]
+                if not filename_base:
+                    filename_base = f"subtitle_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            else:
+                # Use input filename without extension
+                filename_base = Path(input_source).stem
+            
+            output_path = subtitle_dir / f"{filename_base}.{format}"
+        else:
+            output_path = Path(output_path)
+            # Ensure parent directory exists
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Extract subtitle content based on format
+        subtitle_content = ""
+        if format == "srt" and "srt_content" in result:
+            subtitle_content = result["srt_content"]
+        elif format == "vtt" and "srt_content" in result:
+            # Convert SRT to VTT format
+            srt_content = result["srt_content"]
+            subtitle_content = "WEBVTT\n\n" + srt_content.replace(',', '.')
+        elif format == "txt" and "transcript" in result:
+            subtitle_content = result["transcript"]
+        elif "srt_content" in result:
+            subtitle_content = result["srt_content"]
+        else:
+            # Fallback to raw JSON if format not recognized
+            subtitle_content = json.dumps(result, indent=2, ensure_ascii=False)
+        
+        # Write subtitle file
+        output_path.write_text(subtitle_content, encoding='utf-8')
+        
+        return {
+            "status": "success",
+            "message": f"Subtitle file saved successfully",
+            "output_path": str(output_path.absolute()),
+            "format": format,
+            "size": len(subtitle_content),
+            "source": input_source
+        }
+        
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Failed to generate subtitle file: {str(e)}",
+            "source": input_source
+        }
+
+
 @server.list_tools()
 async def handle_list_tools() -> list[Tool]:
     """List available tools."""
@@ -89,6 +167,11 @@ async def handle_list_tools() -> list[Tool]:
             name="audion_vh",
             description="Voice Highlighting - Find and highlight specific keywords in audio/video content",
             inputSchema=AudionVhInput.model_json_schema(),
+        ),
+        Tool(
+            name="audion_subtitle",
+            description="Download subtitle file - Generate and save subtitle file from audio/video content",
+            inputSchema=AudionSubtitleInput.model_json_schema(),
         ),
     ]
 
@@ -114,6 +197,16 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[types.Text
             result = await audion_vh_process(
                 input_data.input_source,
                 input_data.highlight_keywords,
+                input_data.language,
+                input_data.format
+            )
+            return [types.TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+        
+        elif name == "audion_subtitle":
+            input_data = AudionSubtitleInput(**arguments)
+            result = await audion_subtitle_download(
+                input_data.input_source,
+                input_data.output_path,
                 input_data.language,
                 input_data.format
             )
